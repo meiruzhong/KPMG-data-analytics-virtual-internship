@@ -1,0 +1,705 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Mon Sep 12 20:45:30 2022
+
+@author: zhongmeiru
+"""
+
+#%%
+#Data Cleaning
+#first clean customer demographics 
+import numpy as np
+import pandas as pd
+import datetime as dt
+import matplotlib.pyplot as plt
+# Cross-validation helpers
+from sklearn.model_selection import cross_val_score
+from sklearn.model_selection import cross_validate
+from sklearn.model_selection import ShuffleSplit
+
+from sklearn.metrics import f1_score
+from sklearn.metrics import confusion_matrix,classification_report
+import seaborn as sns
+
+def MCtraintest(nmc,X,y,modelObj,testFrac):
+    trainScore = np.zeros(nmc)
+    testScore  = np.zeros(nmc)
+    for i in range(nmc):
+        X_train, X_test, y_train, y_test = train_test_split(X,y,test_size=testFrac)
+        modelObj.fit(X_train,y_train)
+        trainScore[i] = modelObj.score(X_train,y_train)
+        testScore[i]  = modelObj.score(X_test,y_test)
+    return trainScore,testScore
+
+data_customer = pd.read_excel('KPMG_raw_data.xlsx',sheet_name='CustomerDemographic')
+data_customer.shape
+data_customer.describe()
+data_customer.isna().sum()
+
+data_customer = data_customer.drop('default',axis=1)
+data_customer['gender'].replace(['F','Femal'],'Female',inplace=True)
+data_customer['gender'].replace(['M'],'Male',inplace=True)
+data_customer['gender'].replace(['U'],'Unknown',inplace=True)
+
+data_customer['deceased_indicator'].replace('N',0,inplace=True) #alive
+data_customer['deceased_indicator'].replace('Y',1,inplace=True) #dead
+
+data_customer['owns_car'].replace('No',0,inplace=True)  #no car
+data_customer['owns_car'].replace('Yes',1,inplace=True) #have car
+
+data_customer = data_customer[data_customer['DOB']!= data_customer['DOB'].min()]
+data_customer = data_customer[data_customer['deceased_indicator'] == 0]
+
+clean_cus = data_customer.dropna()
+clean_cus['age']= ((dt.datetime.now() - clean_cus['DOB'])/np.timedelta64(1,'Y')).astype(int)
+clean_cus['age_class'] =  (((clean_cus['age']/10).apply(np.ceil))*10).astype(int)
+clean_cus.head()
+
+#second clean customer address
+data_address = pd.read_excel('KPMG_raw_data.xlsx',sheet_name='CustomerAddress')
+data_address.isna().sum()
+data_address.describe()
+
+data_address['state'].replace('New South Wales','NSW',inplace=True)
+data_address['state'].replace('Victoria','VIC',inplace=True)
+clean_address = data_address.dropna()
+clean_address.head()
+
+df_cus = pd.merge(clean_cus,clean_address,left_index=True,right_index=True)
+df_cus.isna().sum()
+df_cus = df_cus.dropna() 
+
+#third clean transaction
+data_transaction = pd.read_excel('KPMG_raw_data.xlsx',sheet_name='Transactions')
+data_transaction.isna().sum()
+data_transaction.duplicated().sum()
+data_transaction = data_transaction.sort_values('customer_id')
+
+clean_transaction = data_transaction.dropna()
+clean_transaction['product_first_sold_date']=pd.TimedeltaIndex(clean_transaction['product_first_sold_date'],unit='d')+dt.datetime(1900,1,1)
+clean_transaction.head()
+clean_transaction = clean_transaction.dropna()
+
+most_recent_date = clean_transaction ['transaction_date'].max()
+clean_transaction['recency'] = (most_recent_date - clean_transaction ['transaction_date'])/np.timedelta64(1,'D')
+clean_transaction['profit'] = clean_transaction['list_price'] - clean_transaction['standard_cost']
+clean_transaction.head()
+clean_transaction.columns
+
+#%%#RFM analysis
+rfm_table = clean_transaction.groupby('customer_id').agg({'recency':lambda x:x.min(),
+                                                          'customer_id':lambda x:len(x), 
+                                                          'profit': lambda x: x.sum()})
+
+rfm_table.rename(columns={'customer_id':'frequency','profit':'monetary_value'},inplace=True)                                                         
+rfm_table.head()
+
+#rank customers
+rfm_table['r_rank'] = rfm_table['recency'].rank(ascending=False)
+rfm_table['f_rank'] = rfm_table['frequency'].rank(ascending=True)
+rfm_table['m_rank'] = rfm_table['monetary_value'].rank(ascending=True)
+
+#normalize rank
+rfm_table['r_rank_norm'] = (rfm_table['r_rank']/rfm_table['r_rank'].max())*100
+rfm_table['f_rank_norm'] = (rfm_table['f_rank']/rfm_table['f_rank'].max())*100
+rfm_table['m_rank_norm'] = (rfm_table['m_rank']/rfm_table['m_rank'].max())*100
+
+rfm_table.drop(columns=['r_rank','f_rank','m_rank'],inplace=True)
+rfm_table.head()
+
+#calculate scores
+#rate them on a scale of 5
+#0.2 recency, 0.5 frequency, 0.3 monetary_value
+rfm_table['rfm_score']=0.2*rfm_table['r_rank_norm']+0.5*rfm_table['f_rank_norm']+0.3*rfm_table['m_rank_norm']
+rfm_table['rfm_score'] *= 0.05
+rfm_table = rfm_table.round(2)
+#>4.5 top customer; 4-4.5 high value; 3-4 medium; 1.5-3 low; <1.5 lost customer
+
+rfm_table['customer_segment'] = np.where(rfm_table['rfm_score']>3.5,'potential customers','low-value customers')
+rfm_table['customer_id_x']=rfm_table.index
+rfm_table.head
+
+df_total = pd.merge(rfm_table,df_cus,how='inner')
+
+df_total.columns
+
+#%%#visualization
+#target = df_total['customer_segment']
+#feature_list =['gender',
+#'past_3_years_bike_related_purchases',
+#'job_industry_category', 'wealth_segment', 
+#'owns_car', 'age_class',
+# 'state', 'property_valuation']
+
+#customer_segment
+plt.hist(df_total['customer_segment']) 
+table_seg = pd.crosstab((df_total['customer_segment']),columns='counts')
+new_index = ['Top customers','high-value customers','medium customers',
+             'low-value customers','lost customers']
+table_seg = table_seg.reindex(new_index) 
+table_seg
+
+#Top customers             85
+#high-value customers     217
+#medium customers         593
+#low-value customers      973
+#lost customers           579
+
+plt.figure()
+cuseg = np.arange(len(table_seg.index))
+cuseg_counts = np.array(table_seg.values).reshape((-1))
+plt.bar(cuseg,cuseg_counts,align='center')
+plt.title('Distribution of customer segment')
+plt.xticks(cuseg,('Top','high-value','medium','low-value','lost'))
+plt.ylabel('counts')
+for i in range(len(cuseg_counts)):
+    plt.annotate(str(cuseg_counts[i]), xy=(cuseg[i],cuseg_counts[i]), ha='center', va='bottom')
+plt.show()
+
+#age
+plt.hist(df_total['age_class']) 
+table_age = pd.crosstab((df_total['age_class']),columns='counts')
+table_age
+#age_class        
+#20             14
+#30            404
+#40            411
+#50            876
+#60            436
+#70            302
+#80              2
+#90              2
+plt.figure()
+age = np.arange(len(table_age.index))
+age_counts = np.array(table_age.values).reshape((-1))
+plt.bar(age,age_counts,align='center')
+plt.title('Distribution of age')
+plt.xticks(age,(20,30,40,50,60,70,80,90))
+plt.ylabel('counts')
+for i in range(len(age_counts)):
+    plt.annotate(str(age_counts[i]), xy=(age[i],age_counts[i]), ha='center', va='bottom')
+plt.show()
+
+from scipy import stats
+_, p_agec = stats.normaltest(df_total['age_class'])
+print(p_agec)# <.05,skewed
+
+#state
+table_state = pd.crosstab((df_total['state']),columns='counts')
+table_state       
+#NSW      1328
+#QLD       509
+#VIC       610
+
+plt.figure()
+state = np.arange(len(table_state.index))
+state_counts = np.array(table_state.values).reshape((-1))
+plt.bar(state,state_counts,align='center')
+plt.title('Distribution of state')
+plt.xticks(state,('NSW','QLD','VIC'))
+plt.ylabel('counts')
+for i in range(len(state_counts)):
+    plt.annotate(str(state_counts[i]), xy=(state[i],state_counts[i]), ha='center', va='bottom')
+plt.show()
+plt.tight_layout()
+
+#owns_car
+table_car = pd.crosstab((df_total['owns_car']),columns='counts')
+table_car       
+#0 No          1196
+#1 Yes          1251
+
+plt.figure()
+car = np.arange(len(table_car.index))
+car_counts = np.array(table_car.values).reshape((-1))
+plt.bar(car,car_counts,align='center')
+plt.title('Distribution of 0wns car')
+plt.xticks(car,('No','Yes'))
+plt.ylabel('counts')
+for i in range(len(car_counts)):
+    plt.annotate(str(car_counts[i]), xy=(car[i],car_counts[i]), ha='center', va='bottom')
+plt.show()
+plt.tight_layout()
+
+#gender
+table_gender = pd.crosstab((df_total['gender']),columns='counts')
+table_gender   
+#Female    1251
+#Male      1196
+
+plt.figure()
+gender = np.arange(len(table_gender.index))
+gender_counts = np.array(table_gender.values).reshape((-1))
+plt.bar(gender,gender_counts,align='center')
+plt.title('Distribution of gender')
+plt.xticks(gender,('Female','Male'))
+plt.ylabel('counts')
+for i in range(len(gender_counts)):
+    plt.annotate(str(gender_counts[i]), xy=(gender[i],gender_counts[i]), ha='center', va='bottom')
+plt.show()
+
+#job_industry
+table_industry = pd.crosstab((df_total['job_industry_category']),columns='counts')
+table_industry
+#Argiculture                86
+#Entertainment             105
+#Financial Services        588
+#Health                    465
+#IT                        105
+#Manufacturing             594
+#Property                  202
+#Retail                    252
+#Telecommunications         50
+
+plt.figure()
+industry = np.arange(len(table_industry.index))
+indu_counts = np.array(table_industry.values).reshape((-1))
+plt.barh(industry,indu_counts,align='center')
+plt.title('Distribution of industry categories')
+plt.yticks(industry,('Argiculture','Entertainment','Financial Services','Health','IT','Manufacturing',
+                     'Property','Retail','Telecommunication'))
+plt.xlabel('counts')
+plt.show()
+
+#past_3_years_bike_related_purchases
+plt.hist(df_total['past_3_years_bike_related_purchases'])
+from scipy import stats
+_, p_bike = stats.normaltest(df_total['past_3_years_bike_related_purchases'])
+print(p_bike)#far smaller than .05, skewed
+
+#property_valuation
+plt.hist(df_total['property_valuation'])#left skewed
+plt.hist(np.log(df_total['property_valuation']))
+from scipy import stats
+_, p_pv = stats.normaltest(df_total['property_valuation'])
+print(p_pv)#far smaller than .05, skewed
+
+#wealth_segment
+table_wealth = pd.crosstab((df_total['wealth_segment']),columns='counts')
+table_wealth  
+#Affluent Customer     607
+#High Net Worth        628
+#Mass Customer        1212
+
+plt.figure()
+wealth = np.arange(len(table_wealth.index))
+wealth_counts = np.array(table_wealth.values).reshape((-1))
+plt.bar(wealth,wealth_counts,align='center')
+plt.title('Distribution of wealth segment')
+plt.xticks(wealth,('Affluent','High net worth','Mass'))
+plt.ylabel('counts')
+for i in range(len(wealth_counts)):
+    plt.annotate(str(wealth_counts[i]), xy=(wealth[i],wealth_counts[i]), ha='center', va='bottom')
+plt.show()
+#%%#data preparation
+
+#predicted variable = rfm_score/ customer_segment
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import OneHotEncoder, StandardScaler, OrdinalEncoder
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import make_pipeline
+from sklearn.linear_model import LogisticRegression
+
+target = df_total['customer_segment']
+encoder= OrdinalEncoder()
+target = np.array(target).reshape(-1,1)
+num_target = encoder.fit_transform(target)
+num_target = np.array(num_target).ravel()
+num_target = pd.Series(num_target)
+
+feature_list =['gender',
+'past_3_years_bike_related_purchases',
+'job_industry_category', 'wealth_segment', 
+'owns_car', 'age_class',
+ 'state', 'property_valuation']
+features = df_total[feature_list]
+catg_columns = features.select_dtypes(['object']).columns
+num_columns = features.select_dtypes(['int64']).columns
+
+df_total[catg_columns]=df_total[catg_columns].apply(lambda x: pd.factorize(x)[0])
+features = df_total[feature_list]
+
+features.info()
+# 4 columns are categorical, including gender, job_industry_category,wealth_segment,state
+# gender: 0 is female, 1 is male
+# job_industry_category: 0 is Health, 1 is Financial Services, 2 is Property, 3 is Argiculture, 4 is Manufacturing,
+# 5 is telecommunications, 6 is Entertainment, 7 is Retail, 8 is IT.
+# wealth_segment: 0 is mass customer, 1 is affluent customer, 2 is high net value
+# state: 0 is NSW, 1 is QLD, 2 is VIC.
+
+#%%#supervised categorical models - No SMOTE Models
+xtrain,xtest,ytrain,ytest = train_test_split(features,target,test_size=0.8,random_state=33)
+#xtrain,xtest,ytrain,ytest = train_test_split(features,num_target,test_size=0.8,random_state=33)
+
+from sklearn import tree
+from sklearn.tree import DecisionTreeClassifier
+nmc=500
+
+#decision_tree 
+dtree = DecisionTreeClassifier()
+dtree = dtree.fit(xtrain,ytrain)
+#tree.plot_tree(dtree,feature_names=feature_list,max_depth=2,fontsize=6)
+dtree_pre = dtree.predict(xtest)
+dtree.score(xtest,ytest)
+#60.62%
+f1_score(ytest,dtree_pre,average='weighted')
+#62.31%
+
+#Monte carlo cross validation
+train_dtree,test_dtree = MCtraintest(nmc, features, target, dtree, 0.25)
+print('MEAN TEST:',np.mean(test_dtree))
+#62.73%
+
+#k-fold cross validation
+nfolds=10
+dtree_cv = cross_validate(dtree,features,target,cv=nfolds,return_train_score=True)
+print('MEAN TEST:',np.mean(dtree_cv['test_score']))
+#62.69%
+
+#shuffle split
+nm=100
+shuffle = ShuffleSplit(n_splits=nm,test_size=0.25)
+dtree_scv = cross_validate(dtree,features,target,cv=shuffle,return_train_score=True)
+print('MEAN TEST:',np.mean(dtree_scv['test_score']))
+#62.39%
+
+plt.scatter(ytest,dtree_pre)
+plt.show()
+
+#logistics models
+from sklearn import linear_model
+logre = linear_model.LogisticRegression()
+logre.fit(xtrain,ytrain)
+logre_pre = logre.predict(xtest)
+logre.score(xtest,ytest)
+#76.61%
+f1_score(ytest,logre_pre,average='weighted')
+#66.46%
+
+#Monte carlo cross validation
+train_logre,test_logre = MCtraintest(nmc, features, target, logre, 0.25)
+print('MEAN TEST:',np.mean(test_logre))
+#76.42%
+
+#k-fold cross validation
+nfolds=10
+logre_cv = cross_validate(logre,features,target,cv=nfolds,return_train_score=True)
+print('MEAN TEST:',np.mean(logre_cv['test_score']))
+#76.46%
+
+
+logre_cm = confusion_matrix(ytest,logre_pre)
+sns.heatmap(logre_cm,annot=True)
+print(classification_report(ytest,logre_pre))
+#performance well, but the potential customers f1-score is 0.
+
+
+#SVC
+from sklearn.svm import SVC
+svcm = SVC(kernel='rbf',random_state=1)
+svcm.fit(xtrain,ytrain)
+svc_pre = svcm.predict(xtest)
+svcm.score(xtest,ytest)
+#76.61%%
+f1_score(ytest,svc_pre,average='weighted')
+#66.46%
+#k-fold cross validation
+nfolds=10
+svcm_cv = cross_validate(svcm,features,target,cv=nfolds,return_train_score=True)
+print('MEAN TEST:',np.mean(svcm_cv['test_score']))
+#76.46%
+print(classification_report(ytest,svc_pre))
+
+
+#knn
+from sklearn.neighbors import KNeighborsClassifier
+knn = KNeighborsClassifier(n_neighbors=1) # k = 1
+knn.fit(xtrain,ytrain)
+knn_pre = knn.predict(xtest)
+knn.score(xtest,ytest)
+#65.27%
+f1_score(ytest,knn_pre,average='weighted')
+#65.30%
+
+#random forest
+from sklearn.ensemble import RandomForestClassifier
+rf = RandomForestClassifier(n_estimators = 1000,random_state = 42)
+rf.fit(xtrain,ytrain)
+rf_pre = rf.predict(xtest)
+rf.score(xtest,ytest)
+#73.75%
+f1_score(ytest,rf_pre,average='weighted')
+#66.73%
+rf_cv = cross_validate(rf,features,target,cv=nfolds,return_train_score=True)
+print('MEAN TEST:',np.mean(rf_cv['test_score']))
+#75.11%
+print(classification_report(ytest,rf_pre))
+
+#adaboost
+from sklearn import model_selection
+from sklearn.ensemble import AdaBoostClassifier
+seed = 7
+num_trees = 30
+adabst = AdaBoostClassifier(n_estimators=num_trees, random_state=seed)
+ada_cv = cross_validate(adabst,features,target,cv=nfolds,return_train_score=True)
+print('MEAN TEST:',np.mean(ada_cv['test_score']))
+#76.34%
+
+## Stochastic Gradient Boosting Classification
+from sklearn.ensemble import GradientBoostingClassifier
+seed = 7
+num_trees = 100
+gboost = GradientBoostingClassifier(n_estimators=num_trees, random_state=seed)
+gboost_cv = cross_validate(gboost,features,target,cv=nfolds,return_train_score=True)
+print('MEAN TEST:',np.mean(gboost_cv['test_score']))
+#75.85%
+
+
+#%%#unsupervised k-means clustering analysis - NO SMOTE models
+from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_score
+
+data_kmeans = pd.concat([features,num_target],axis=1)
+
+inertias = []
+for i in range(1,11):
+    kmeans=KMeans(n_clusters=i)
+    kmeans.fit(data_kmeans)
+    inertias.append(kmeans.inertia_)
+    
+plt.plot(range(1,11),inertias,marker='o')
+plt.title('Elbow method')
+plt.xlabel('Number of clusters')
+plt.ylabel('Inertia')
+plt.show()
+#The elbow method shows that 2 is a good value for K, so we retrain and visualize the result
+#trainx,testx,trainy,testy = train_test_split(features,num_target,test_size=0.7,random_state=33)
+kmeans=KMeans(n_clusters=5,random_state=33)
+kmeans.fit(data_kmeans)
+kmeans.inertia_
+labels = kmeans.labels_
+correct_labels = sum(num_target == labels)
+print(correct_labels, num_target.size)
+accuracy_kmeans = correct_labels/num_target.size
+accuracy_kmeans
+#n_clusters = 2, 0.0576
+#We have achieved a weak classification accuracy of 6% by our unsupervised model.
+#n_clusters = 5, 0.2047
+
+#%% realized the imbalanced and skewed data problems - USE SMOTE TO FIX
+
+#Imbalanced: state, industry, wealth_segment, customer_segment
+#Skewed:property_valuation, past_3_years_bike_related_purchases, age_class
+#Balanced:own_car
+
+#first fix imbalanced problems
+#target: customer_segment
+from imblearn.over_sampling import SMOTE
+# Resampling the minority class. The strategy can be changed as required.
+sm = SMOTE(random_state=42,sampling_strategy='minority')
+
+# Fit the model to generate the data.
+oversampled_X, oversampled_Y = sm.fit_resample(features,target)
+oversampled = pd.concat([pd.DataFrame(oversampled_Y), pd.DataFrame(oversampled_X)], axis=1)
+oversampled['customer_segment'] = oversampled.iloc[:,0]
+oversampled.columns
+oversampled.drop(columns=0,inplace=True)
+
+over_target = oversampled['customer_segment']
+over_features = oversampled.iloc[:,:8]
+oversampled.info()
+
+plt.hist(oversampled['customer_segment']) 
+overtable_seg = pd.crosstab((oversampled['customer_segment']),columns='counts')
+
+plt.hist(oversampled['age_class']) 
+plt.hist(oversampled['customer_segment']) 
+plt.hist(oversampled['job_industry_category']) 
+plt.hist(df_total['past_3_years_bike_related_purchases'])
+plt.hist(df_total['gender'])
+
+#%% #second fixed skewed data issues (neligible effects)
+from sklearn.preprocessing import QuantileTransformer
+quantile = QuantileTransformer(output_distribution='normal')
+age_array = np.array(oversampled['age_class']).reshape(-1,1)
+age_quantile = quantile.fit_transform(age_array) 
+plt.hist(age_quantile)
+plt.show()
+
+bike_array = np.array(oversampled['past_3_years_bike_related_purchases']).reshape(-1,1)
+bike_quantile = quantile.fit_transform(bike_array) 
+plt.hist(bike_quantile)
+plt.show()
+
+property_array = np.array(oversampled['property_valuation']).reshape(-1,1)
+property_quantile = quantile.fit_transform(property_array) 
+plt.hist(property_quantile)
+plt.show()
+
+
+oversampled['age_class'] = age_quantile
+oversampled['past_3_years_bike_related_purchases'] = bike_quantile
+oversampled['property_valuation'] = property_quantile
+
+
+#%% supervised models with SMOTE (performed worse than No SMOTE models)
+from sklearn.metrics import f1_score
+cag_preprocessor = OrdinalEncoder()
+num_preprocessor = StandardScaler()
+preprocessor = ColumnTransformer([('ordinal-encoder',cag_preprocessor,catg_columns),
+                                  ('standard_scaler',num_preprocessor,num_columns)])
+
+oxtrain,oxtest,oytrain,oytest = train_test_split(over_features,over_target,test_size=0.8,random_state=33)
+
+model_log = make_pipeline(preprocessor,LogisticRegression(max_iter=500,random_state=33))
+model_log.fit(oxtrain,oytrain)
+log_pre = model_log.predict(oxtest)
+model_log.score(oxtest,oytest)
+#63.06%
+f1_score(oytest,log_pre,average='weighted')
+#62.85%
+print(classification_report(oytest,log_pre))
+#although perform a little less than no smote models, the potential customers' f1-score is 0.6
+
+
+from sklearn.svm import SVC
+model_svc = make_pipeline(preprocessor,SVC(kernel='rbf',random_state=1))
+model_svc.fit(oxtrain,oytrain)
+svc_pre = model_svc.predict(oxtest)
+model_svc.score(oxtest,oytest)
+#62.63%
+f1_score(oytest,svc_pre,average='weighted')
+#62.25%
+print(classification_report(oytest,svc_pre))
+#the potential customers' f1-score is 0.59
+
+from sklearn.neighbors import KNeighborsClassifier
+model_knn = make_pipeline(preprocessor, KNeighborsClassifier(n_neighbors=20) )
+model_knn.fit(oxtrain,oytrain)
+knn_pre = model_knn.predict(oxtest)
+model_knn.score(oxtest,oytest)
+#62.32%
+f1_score(oytest,knn_pre,average='weighted')
+#62.26%
+print(classification_report(oytest,knn_pre))
+#the potential customers' f1-score is 0.61
+
+from sklearn.tree import DecisionTreeClassifier
+model_dtree = DecisionTreeClassifier()
+model_dtree = model_dtree.fit(oxtrain,oytrain)
+#tree.plot_tree(dtree,feature_names=feature_list,max_depth=2,fontsize=6)
+dtree_pre = model_dtree.predict(oxtest)
+model_dtree.score(oxtest,oytest)
+#60.59%
+f1_score(oytest,dtree_pre,average='weighted')
+#60.59%
+print(classification_report(oytest,dtree_pre))
+#the potential customers' f1-score is 0.61
+
+#random forest
+from sklearn.ensemble import RandomForestClassifier
+model_rf = RandomForestClassifier(n_estimators = 1000,random_state = 42)
+model_rf.fit(oxtrain,oytrain)
+rf_pre = model_rf.predict(oxtest)
+model_rf.score(oxtest,oytest)
+#66.80%
+f1_score(oytest,rf_pre,average='weighted')
+#66.77%
+nfolds=10
+rf_cv = cross_validate(model_rf,over_features,over_target,cv=nfolds,return_train_score=True)
+print('MEAN TEST:',np.mean(rf_cv['test_score']))
+#72.88%
+print(classification_report(oytest,rf_pre))
+#the potential customers' f1-score is 0.67
+
+#adaboost
+from sklearn import model_selection
+from sklearn.ensemble import AdaBoostClassifier
+seed = 7
+num_trees = 30
+adabst = AdaBoostClassifier(n_estimators=num_trees, random_state=seed)
+oada_cv = cross_validate(adabst,over_features,over_target,cv=nfolds,return_train_score=True)
+print('MEAN TEST:',np.mean(oada_cv['test_score']))
+#65.83%
+adabst.fit(oxtrain,oytrain)
+ada_pre = adabst.predict(oxtest)
+print(classification_report(oytest,ada_pre))
+#the potential customers' f1-score is 0.64
+
+
+## Stochastic Gradient Boosting Classification
+from sklearn.ensemble import GradientBoostingClassifier
+seed = 7
+num_trees = 100
+gboost = GradientBoostingClassifier(n_estimators=num_trees, random_state=seed)
+gboost_cv = cross_validate(gboost,over_features,over_target,cv=nfolds,return_train_score=True)
+print('MEAN TEST:',np.mean(gboost_cv['test_score']))
+#68.07%
+gboost.fit(oxtrain,oytrain)
+gboost_pre = gboost.predict(oxtest)
+print(classification_report(oytest,gboost_pre))
+#the potential customers' f1-score is 0.64
+
+#xgboost
+import xgboost
+array_otarget = np.array(over_target).reshape(-1,1)
+num_overtarget = encoder.fit_transform(array_otarget)
+num_overtarget = np.array(num_overtarget).ravel()
+num_overtarget = pd.Series(num_overtarget)
+noxtrain,noxtest,noytrain,noytest = train_test_split(over_features,num_overtarget,test_size=0.8,random_state=33)
+
+xgb = xgboost.XGBClassifier(random_state=seed)
+xgb_cv = cross_validate(xgb,over_features,num_overtarget,cv=nfolds,return_train_score=True)
+print('MEAN TEST:',np.mean(xgb_cv['test_score']))
+#73.60%
+xgb.fit(noxtrain,noytrain)
+noxgb_pre = xgb.predict(noxtest)
+print(classification_report(noytest,noxgb_pre))
+#the potential customers' f1-score is 0.63
+
+#%%#predict the new 1000 customer list
+data_new= pd.read_excel('KPMG_raw_data.xlsx',sheet_name='NewCustomerList')
+data_new.isna().sum()
+
+data_new = data_new.drop(columns=['Unnamed: 16','Unnamed: 17','Unnamed: 18','Unnamed: 19',
+                                  'Unnamed: 20'],axis=1)
+
+clean_new = data_new.dropna()
+clean_new.head()
+
+clean_new['age'] = ((dt.datetime.now() - clean_new['DOB'])/np.timedelta64(1,'Y')).astype(int) 
+clean_new['age_class'] = (((clean_new['age']/10).apply(np.ceil))*10).astype(int)
+clean_new = clean_new.drop('DOB',axis=1)
+clean_new.columns
+
+new_features = clean_new[feature_list]
+new_catg_columns = new_features.select_dtypes(['object']).columns
+new_num_columns = new_features.select_dtypes(['int64']).columns
+
+clean_new[new_catg_columns]=clean_new[new_catg_columns].apply(lambda x: pd.factorize(x)[0])
+new_features = clean_new[feature_list]
+
+new_target_predict = model_rf.predict(new_features)
+new_target_predict = pd.Series(new_target_predict)
+fistnm = clean_new['first_name']
+lastnm = clean_new['last_name']
+final_result = pd.concat([fistnm,lastnm],axis=1)
+final_result = pd.DataFrame(final_result)
+final_result['customer_segment'] = new_target_predict
+final_result.head()
+
+potential_Flag = 'potential customers'
+potential_count = (potential_Flag == final_result['customer_segment']).sum()
+potential_pec = round((potential_count/(final_result.shape[0]))*100,2)
+print('potential customers:'+ str(potential_count))#159/715
+print('potential customers percentage:'+ str(potential_pec)+'%.')#22.24%
+
+
+
+
+
+
+
+
+
