@@ -329,6 +329,11 @@ features.info()
 # state: 0 is NSW, 1 is QLD, 2 is VIC.
 
 #%%#supervised categorical models - No SMOTE Models
+#although the Non-SMOTE models' accuracy score and F1 score is higher than those in models with SMOTE, 
+#the potential customers F1 score in Non-SMOTE models is 0 but not in SMOTE model.
+
+#random forest model performs the best with F1 score 0.6673.
+
 xtrain,xtest,ytrain,ytest = train_test_split(features,target,test_size=0.8,random_state=33)
 #xtrain,xtest,ytrain,ytest = train_test_split(features,num_target,test_size=0.8,random_state=33)
 
@@ -367,7 +372,7 @@ print('MEAN TEST:',np.mean(dtree_scv['test_score']))
 plt.scatter(ytest,dtree_pre)
 plt.show()
 
-#logistics models
+#logistic models
 from sklearn import linear_model
 logre = linear_model.LogisticRegression()
 logre.fit(xtrain,ytrain)
@@ -430,7 +435,8 @@ rf_pre = rf.predict(xtest)
 rf.score(xtest,ytest)
 #73.75%
 f1_score(ytest,rf_pre,average='weighted')
-#66.73%
+#66.73%, but the potential customers' f1-score is 0.0
+
 rf_cv = cross_validate(rf,features,target,cv=nfolds,return_train_score=True)
 print('MEAN TEST:',np.mean(rf_cv['test_score']))
 #75.11%
@@ -544,6 +550,9 @@ oversampled['property_valuation'] = property_quantile
 
 
 #%% supervised models with SMOTE (performed worse than No SMOTE models)
+
+#the random forest model performs the best with accuracy score 72.88% and F1 score 0.6677
+
 from sklearn.metrics import f1_score
 cag_preprocessor = OrdinalEncoder()
 num_preprocessor = StandardScaler()
@@ -585,10 +594,11 @@ f1_score(oytest,knn_pre,average='weighted')
 print(classification_report(oytest,knn_pre))
 #the potential customers' f1-score is 0.61
 
+from sklearn import tree
 from sklearn.tree import DecisionTreeClassifier
 model_dtree = DecisionTreeClassifier()
 model_dtree = model_dtree.fit(oxtrain,oytrain)
-#tree.plot_tree(dtree,feature_names=feature_list,max_depth=2,fontsize=6)
+tree.plot_tree(model_dtree,feature_names=feature_list,max_depth=1,fontsize=6)
 dtree_pre = model_dtree.predict(oxtest)
 model_dtree.score(oxtest,oytest)
 #60.59%
@@ -601,6 +611,10 @@ print(classification_report(oytest,dtree_pre))
 from sklearn.ensemble import RandomForestClassifier
 model_rf = RandomForestClassifier(n_estimators = 1000,random_state = 42)
 model_rf.fit(oxtrain,oytrain)
+#feature importance plots
+feature_imp = pd.Series(model_rf.feature_importances_,index=feature_list).sort_values(ascending=False)
+feature_imp
+
 rf_pre = model_rf.predict(oxtest)
 model_rf.score(oxtest,oytest)
 #66.80%
