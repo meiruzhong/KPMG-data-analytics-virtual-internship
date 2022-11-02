@@ -1,4 +1,4 @@
-# KPMG-data-analytics-virtual-internship
+# Data-Analytics-Predictive-Customer-Model
 Task: please recommend which of these 1000 new customers should be targeted to drive the most value for the organisation.
 Solution: 
 1. Use python to clean data, including addressing missing values and outliers and formatting data types.
